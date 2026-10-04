@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import getpass
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -14,6 +16,9 @@ from minitau_agent.async_iterators import closing_async_iterator
 from minitau_agent.provider import ModelProvider
 from minitau_ai.factory import create_provider
 from minitau_coding import __version__
+from minitau_coding.configuration import ConfigurationCancelled, configure_provider
+from minitau_coding.interrupts import catch_idle_interrupts
+from minitau_coding.provider_runtime import MissingProviderCredentials, ProviderRuntime
 from minitau_coding.rendering import EventRenderer
 from minitau_coding.repl import run_repl
 from minitau_coding.session import CodingSession, CodingSessionConfig
@@ -29,8 +34,10 @@ async def _open_session(
     resume: str | None,
     continue_latest: bool,
     title: str,
+    runtime: ProviderRuntime | None = None,
+    configure: Callable[[str | None], str] | None = None,
 ) -> tuple[CodingSession, ModelProvider]:
-    """先读快照再建 Provider；失败时由本函数关闭新建的实例。"""
+    """先读快照再建 Provider；有 Runtime 时由入口 finally 统一关闭实例。"""
     snapshot: SessionSnapshot | None = None
     if continue_latest:
         snapshot = await manager.latest()
@@ -42,8 +49,23 @@ async def _open_session(
         if snapshot is not None and snapshot.model_change is not None
         else None
     )
-    chosen_provider = provider_name or stored_provider or "fake"
-    provider, default_model = create_provider(chosen_provider)
+    default_provider = runtime.default_provider if runtime is not None else None
+    chosen_provider = provider_name or stored_provider or default_provider
+    if chosen_provider is None and configure is not None:
+        chosen_provider = configure(None)
+    chosen_provider = chosen_provider or "fake"
+    factory = runtime.create if runtime is not None else create_provider
+    try:
+        provider, default_model = factory(chosen_provider)
+    except MissingProviderCredentials:
+        if configure is None:
+            raise
+        selected = configure(chosen_provider)
+        # 为调用方保留“缺少配置时选择另一家”的能力，明确覆盖快照的供应商。
+        if selected != chosen_provider:
+            provider_name = selected
+        chosen_provider = selected
+        provider, default_model = factory(selected)
     try:
         config = CodingSessionConfig(
             cwd=manager.cwd,
@@ -54,6 +76,7 @@ async def _open_session(
             model_explicit=model_name is not None,
             context_window_tokens=context_window,
             context_window_explicit=context_window is not None,
+            provider_factory=runtime.create if runtime is not None else None,
         )
         session = (
             CodingSession.from_snapshot(config, snapshot)
@@ -64,7 +87,8 @@ async def _open_session(
         )
         return session, provider
     except BaseException:
-        await provider.aclose()
+        if runtime is None:
+            await provider.aclose()
         raise
 
 
@@ -302,16 +326,18 @@ def run_print_mode(
     manager = SessionManager(cwd)
 
     async def run_and_close() -> int:
-        session, provider = await _open_session(
-            manager=manager,
-            provider_name=provider_name,
-            model_name=model_name,
-            context_window=context_window,
-            resume=resume,
-            continue_latest=continue_latest,
-            title=prompt[:40],
-        )
+        runtime = ProviderRuntime(manager.cwd, factory=create_provider)
         try:
+            session, _provider = await _open_session(
+                manager=manager,
+                provider_name=provider_name,
+                model_name=model_name,
+                context_window=context_window,
+                resume=resume,
+                continue_latest=continue_latest,
+                title=prompt[:40],
+                runtime=runtime,
+            )
             label = "Resumed session" if resume is not None or continue_latest else "Session"
             typer.echo(f"{label}: {session.session_id}", err=True)
             return await _run_print_session(
@@ -319,7 +345,7 @@ def run_print_mode(
                 prompt=prompt,
             )
         finally:
-            await provider.aclose()
+            await runtime.aclose()
 
     try:
         exit_code = asyncio.run(run_and_close())
@@ -364,17 +390,29 @@ def run_interactive_mode(
     manager = SessionManager(cwd)
 
     async def run_and_close() -> None:
-        session, provider = await _open_session(
-            manager=manager,
-            provider_name=provider_name,
-            model_name=model_name,
-            context_window=context_window,
-            resume=resume,
-            continue_latest=continue_latest,
-            title=(initial_prompt or "")[:40],
-        )
+        runtime = ProviderRuntime(manager.cwd, factory=create_provider)
+
+        def configure(name: str | None) -> str:
+            with catch_idle_interrupts():
+                return configure_provider(
+                    runtime, name, ask=input, ask_secret=getpass.getpass, show=typer.echo
+                )
+
         try:
+            session, _provider = await _open_session(
+                manager=manager,
+                provider_name=provider_name,
+                model_name=model_name,
+                context_window=context_window,
+                resume=resume,
+                continue_latest=continue_latest,
+                title=(initial_prompt or "")[:40],
+                runtime=runtime,
+                configure=configure,
+            )
             typer.echo(f"Session: {session.session_id}", err=True)
+            typer.echo(f"Provider: {session.provider_name}  Model: {session.status.model}")
+            typer.echo("/config 配置 API；/provider 选择供应商；/model 切换模型；/help 查看命令。")
 
             await run_repl(
                 session,
@@ -387,12 +425,17 @@ def run_interactive_mode(
                     nl=False,
                 ),
                 initial_prompt=initial_prompt,
+                provider_runtime=runtime,
+                ask=input,
+                ask_secret=getpass.getpass,
             )
         finally:
-            await provider.aclose()
+            await runtime.aclose()
 
     try:
         asyncio.run(run_and_close())
+    except ConfigurationCancelled:
+        typer.echo("已取消启动配置。下次可直接运行 minitau，或用 --provider demo 离线体验。")
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 

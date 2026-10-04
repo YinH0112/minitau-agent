@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -40,23 +40,30 @@ class CodingSessionConfig:
     provider_explicit: bool = False
     model_explicit: bool = False
     context_window_explicit: bool = False
+    # 由应用入口提供，负责依据本地设置创建并管理新 Provider。
+    # Session 仍然只借用实例，离线测试或嵌入式调用可以不提供。
+    provider_factory: Callable[[str | None], tuple[ModelProvider, str]] | None = None
 
 
 def _effective_config(
     launch: CodingSessionConfig,
     stored: ModelChangeEntry | None,
 ) -> CodingSessionConfig:
-    """启动参数优先；只接受与当前 Provider 匹配的会话模型。"""
+    """启动参数优先；跨供应商恢复时必须连 Provider 实例一起恢复。"""
     if stored is None:
         return launch
     if stored.provider_name != launch.provider_name:
-        if not launch.provider_explicit:
+        if not launch.provider_explicit and launch.provider_factory is not None:
+            provider, _default_model = launch.provider_factory(stored.provider_name)
+            launch = replace(launch, provider=provider, provider_name=stored.provider_name)
+        elif not launch.provider_explicit:
             raise ValueError(
                 f"Session uses provider {stored.provider_name!r}; "
                 f"current provider is {launch.provider_name!r}"
             )
-        # 显式 --provider 选择了另一家时，不能沿用旧 Provider 的模型和窗口。
-        return launch
+        else:
+            # 显式 --provider 选择了另一家时，不能沿用旧 Provider 的模型和窗口。
+            return launch
     return replace(
         launch,
         model=launch.model if launch.model_explicit else stored.model,
@@ -234,12 +241,14 @@ class CodingSession:
         if state is None:
             raise ValueError("Branch point must be a safe complete assistant turn or compaction")
 
+        # 先准备目标 Provider；配置缺失时不能先落盘 LeafEntry 再报错。
+        effective = _effective_config(self._launch_config, state.model_change)
         await self._harness.select_branch(
             target_id=target_id,
             messages=state.messages,
             entry_ids=state.context_entry_ids,
         )
-        self._apply_model_config(_effective_config(self._launch_config, state.model_change))
+        self._apply_model_config(effective)
 
     async def tree_choices(self) -> tuple[TreeChoice, ...]:
         """读取可分叉节点，供 REPL 展示。"""
@@ -317,6 +326,10 @@ class CodingSession:
         return self._session_id
 
     @property
+    def provider_name(self) -> str:
+        return self._config.provider_name
+
+    @property
     def messages(self) -> tuple[AgentMessage, ...]:
         return self._harness.messages
 
@@ -369,7 +382,33 @@ class CodingSession:
         # 写入成功后才切换；持久化失败不会出现界面与日志分歧。
         self._apply_model_config(replace(self._config, model=selected))
 
+    async def set_provider(self, name: str) -> None:
+        """先创建客户端，再写分支配置，最后同时切换 Provider 和模型。"""
+        self._ensure_idle("change provider")
+        factory = self._config.provider_factory
+        if factory is None:
+            raise ValueError("当前入口不支持供应商切换；请使用交互 CLI")
+        # 即使名字相同也重建客户端：/config 可能刚刚更换了 key 或端点。
+        provider, model = factory(name)
+        config = replace(
+            self._config,
+            provider=provider,
+            provider_name=name,
+            model=model,
+            context_window_tokens=None,
+            provider_explicit=False,
+            model_explicit=False,
+            context_window_explicit=False,
+        )
+        await self._harness.append_model_change(
+            provider_name=name, model=model, context_window_tokens=None
+        )
+        self._apply_model_config(config)
+        # 用户在界面里作出新选择后，后续 /resume、/branch 再按目标分支恢复。
+        self._launch_config = config
+
     def _apply_model_config(self, config: CodingSessionConfig) -> None:
+        self._harness.config.provider = config.provider
         self._harness.config.model = config.model
         self._harness.config.context_window_tokens = config.context_window_tokens
         self._config = config

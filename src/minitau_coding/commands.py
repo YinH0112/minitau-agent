@@ -8,6 +8,7 @@ from datetime import datetime
 
 from minitau_agent.async_iterators import closing_async_iterator
 from minitau_agent.events import AgentEvent, CompactionEndEvent
+from minitau_coding.provider_runtime import ProviderRuntime
 from minitau_coding.session import CodingSession
 from minitau_coding.session_manager import SessionManager
 
@@ -34,6 +35,7 @@ class CommandContext:
     session: CodingSession # 当前聊天会话
     manager: SessionManager # 会话管理器
     on_event: EventSink # 事件回调
+    provider_runtime: ProviderRuntime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,8 @@ class CommandResult:
     exit_requested: bool = False  # 可选：是否要退出程序（如 /quit）
     error: str | None = None  # 可选：错误信息
     prompt: str | None = None  # 可选：命令转换后的真正提问文本
+    configuration_requested: bool = False
+    provider_to_configure: str | None = None
 
 
 type CommandHandler = Callable[[CommandContext, str], Awaitable[CommandResult]]
@@ -88,6 +92,7 @@ async def _status(context: CommandContext, argument: str) -> CommandResult:
     message = (
         f"Session: {status.session_id}\n"
         f"Working directory: {status.cwd}\n"
+        f"Provider: {context.session.provider_name}\n"
         f"Model: {status.model}\n"
         f"Context: approximately {status.estimated_tokens}/"
         f"{status.context_window_tokens} tokens\n"
@@ -211,9 +216,57 @@ async def _model(context: CommandContext, argument: str) -> CommandResult:
         )
 
     await context.session.set_model(argument)
+    if context.provider_runtime is not None:
+        try:
+            context.provider_runtime.save_model(
+                context.session.provider_name, context.session.status.model
+            )
+        except ValueError:
+            return CommandResult(
+                handled=True,
+                error="当前会话已切换模型，但保存启动默认值失败；请检查 .minitau/settings.json。",
+            )
     return CommandResult(
         handled=True,
         message=f"Current model: {context.session.status.model}",
+    )
+
+async def _config(context: CommandContext, argument: str) -> CommandResult:
+    """只返回向导请求，让 REPL 在 idle 中读取输入，避免 SIGINT 被活动任务吞掉。"""
+    if context.provider_runtime is None:
+        raise ValueError("此入口没有交互配置向导")
+    parts = argument.split()
+    if len(parts) > 1:
+        raise ValueError("Usage: /config [provider]")
+    name = parts[0].lower() if parts else None
+    if name is not None:
+        context.provider_runtime.validate_name(name)
+    return CommandResult(
+        handled=True, configuration_requested=True, provider_to_configure=name
+    )
+
+
+async def _provider(context: CommandContext, argument: str) -> CommandResult:
+    runtime = context.provider_runtime
+    if runtime is None:
+        raise ValueError("此入口没有供应商配置功能")
+    if not argument:
+        return CommandResult(handled=True, message=runtime.describe(context.session.provider_name))
+    parts = argument.split()
+    if len(parts) != 1:
+        raise ValueError("Usage: /provider [name]")
+    name = parts[0].lower()
+    runtime.validate_name(name)
+    await context.session.set_provider(name)
+    try:
+        runtime.store.set_default(name)
+    except ValueError:
+        return CommandResult(
+            handled=True,
+            error="当前会话已切换供应商，但保存启动默认值失败；请检查 .minitau/settings.json。",
+        )
+    return CommandResult(
+        handled=True, message=f"当前供应商：{name}；模型：{context.session.status.model}"
     )
 
 async def _tree(context: CommandContext, argument: str) -> CommandResult:
@@ -259,6 +312,12 @@ async def _branch(context: CommandContext, argument: str) -> CommandResult:
     )
 
 COMMANDS: dict[str, CommandSpec] = {
+    "config": CommandSpec(
+        "config", "/config [provider]", "Configure API key, endpoint and model.", _config
+    ),
+    "provider": CommandSpec(
+        "provider", "/provider [name]", "List or switch providers.", _provider
+    ),
     "help": CommandSpec("help", "/help", "Show commands.", _help),
     "status": CommandSpec("status", "/status", "Show session status.", _status),
     "sessions": CommandSpec("sessions", "/sessions", "List sessions.", _sessions),
@@ -313,6 +372,6 @@ async def dispatch_input(
 
     try:
         return await spec.handler(context, argument)
-    except (ValueError, RuntimeError) as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         # 会话层的“无匹配”“正在运行”等可预期错误变成命令结果。
         return CommandResult(handled=True, error=str(exc))
