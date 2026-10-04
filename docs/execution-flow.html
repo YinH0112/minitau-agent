@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minitau 执行流程详解</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f7f7f5;
+  --text: #2c2c2a;
+  --text-soft: #5f5e5a;
+  --border: #d3d1c7;
+  --accent: #534ab7;
+  --accent-soft: #eeedfe;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+}
+.wrap { max-width: 900px; margin: 0 auto; padding: 48px 24px 96px; }
+h1 { font-size: 28px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.3px; }
+h2 {
+  font-size: 21px; font-weight: 600; margin: 56px 0 16px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; font-weight: 600; margin: 32px 0 12px; }
+h4 { font-size: 15px; font-weight: 600; margin: 24px 0 10px; color: var(--text-soft); }
+p { margin: 14px 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 8px 8px 0;
+  color: var(--text);
+}
+blockquote p { margin: 6px 0; }
+code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+pre {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  overflow-x: auto;
+  margin: 16px 0;
+  line-height: 1.6;
+}
+pre code { background: none; border: none; padding: 0; font-size: 13px; }
+table {
+  border-collapse: collapse; width: 100%; margin: 18px 0;
+  font-size: 14px;
+}
+th, td {
+  border: 1px solid var(--border); padding: 9px 13px; text-align: left;
+  vertical-align: top;
+}
+th { background: var(--bg-soft); font-weight: 600; }
+tr:nth-child(even) td { background: #fafaf8; }
+.mermaid {
+  background: #fdfdfc;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin: 22px 0;
+  text-align: center;
+  overflow-x: auto;
+}
+hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
+ul, ol { padding-left: 26px; margin: 14px 0; }
+li { margin: 6px 0; }
+.meta { color: var(--text-soft); font-size: 13px; margin-bottom: 32px; }
+</style>
+</head>
+<body>
+<div class="wrap" id="content">
+<h1>minitau 执行流程详解</h1>
+<p class="meta">目标：把 <code>uv run minitau -p "你好"</code> 这一条命令，从敲下回车到屏幕出字，完整拆开讲一遍。每个环节都标注了真实代码位置，可以直接对着源码读。</p>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+(async function () {
+  const res = await fetch('execution-flow.md');
+  const md = await res.text();
+
+  const renderer = new marked.Renderer();
+  const origCode = renderer.code.bind(renderer);
+  renderer.code = function (code, lang) {
+    if (lang === 'mermaid') {
+      return '<div class="mermaid">' + code + '</div>';
+    }
+    return origCode(code, lang);
+  };
+  marked.setOptions({ renderer: renderer, breaks: false, gfm: true });
+
+  document.getElementById('content').innerHTML = marked.parse(md);
+
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "Microsoft YaHei", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#eeedfe',
+      primaryTextColor: '#2c2c2a',
+      primaryBorderColor: '#534ab7',
+      lineColor: '#888780',
+      secondaryColor: '#e1f5ee',
+      tertiaryColor: '#f1efe8'
+    },
+    flowchart: { curve: 'basis', padding: 14, useMaxWidth: true },
+    sequence: { useMaxWidth: true, wrap: true }
+  });
+
+  await mermaid.run({ querySelector: '.mermaid' });
+})();
+</script>
+</body>
+</html>
