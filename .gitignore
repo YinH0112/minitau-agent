@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local session history may contain prompts, tool output, and project data.
+.minitau/
+
+# Local IDE and agent working data
+.idea/
+.vscode/
+.trace/
+.trae/
+.workbuddy/
+.workbuddy-ai/
+
+# Test and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
